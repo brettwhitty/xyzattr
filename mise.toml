@@ -2,6 +2,8 @@
 go = "latest"
 node = "lts"
 
+[env]
+
 [tasks."build"]
 run = "go build ./pkg/xyzattr/..."
 description = "Build the core library"
