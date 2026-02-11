@@ -225,3 +225,5 @@ msbuild.wrn
 # Built Visual Studio Code Extensions
 *.vsix
 
+## internal instructions
+.gemini/gemini-local-tools
