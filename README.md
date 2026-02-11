@@ -1,109 +1,79 @@
 # xyzattr
 
-## Project Description
+![xyzattr](./assets/images/xyzattr-banner-lets-go.jpg "xyzattr --- Let's GO!!!")
+
 Simple Golang library for performant, stable, persistent, cross-platform, cross-filesystem abstraction of extensible, schema-driven extended file attributes.
 
-## Development Notes
+## Features
 
-### Language
+- **Cross-Platform**: Consistent API for Windows, macOS, and Linux.
+- **Cross-Filesystem**: Support for native `xattr`, NTFS Alternate Data Streams, ZFS properties, and smart fallback mechanisms.
+- **Non-Destructive**: Never modifies the original file contents.
+- **Performant**: Designed for minimal overhead and stable persistence.
 
-- Golang (1.25)
+## Documentation
 
-### Requirements
+Comprehensive details on implementation and requirements can be found in the [Technical Specifications](docs/spec.md).
 
-#### Cross-Platform
+## Usage
 
-Must compile and provide consistent function on at least:
+The `xyzattr` library provides a simple, fluent API that guarantees persistence regardless of the underlying filesystem.
 
-- Windows
-- macOS
-- Linux
+```go
+import "gitea.gnomatix.com/gnomatix/xyzattr/pkg/xyzattr"
 
-#### Cross-Filesystem
+func main() {
+    // Get a store bound to a file
+    store := xyzattr.At("path/to/file.txt")
 
-The core functionality of this library is to provide all features and functions of POSIX-compliant `xattr` by abstraction and/or virtualization.
+    // Set an attribute (automatically uses native ADS/xattr or falls back to registry)
+    err := store.Set("user.comment", []byte("Important file"))
 
-##### Native `xattr` Support
+    // Get an attribute
+    val, err := store.Get("user.comment")
 
-On systems / fileysystems with native POSIX-compliant `xattr` support, this library should provide native-level functionality.
-
-See: https://en.wikipedia.org/wiki/Extended_file_attributes
-
-##### Alternative Native Persistent Attribute Store
-
-Where native `xattr` support is lacking, alternative OS-/filesystem-specific extended attribute methods should be supported and configurable.
-
-For example:
-- ZFS properties
-- NTFS alternative data streams (see `NTFS-3G` implementation)
-
-_NOTE_ Supported alternative storage methods must be:
-- Most sensible/appropriate for the particular OS/filesystem.
-- Non-destructive --- should not alter the file itself.
-- Minimal-to-Zero impact
-- Performant
-
-##### Alternative Standard/Libary-specific Persistent Attribute Store
-
-The library should be implemented in such a way that failing native `xattr`, and native `xattr`-like support, it will fall back on context-appropriate alternatives.
-
-The fallback strategy should appropriately choose the best implementation based on:
-- OS
-- Filesystem
-- Performance
-- Reliability
-- Standards-compliant
-- Minimal-to-Zero impact
-
-### Essential Library Abstractions
-
-All POSIX-compliant `xattr` functionality should be abstracted at the top-level of implementation.
-
-#### Example: Polymorphic Get / Set
-Simple functions like get/set might be abstracted as:
-
-```
-att := xyzattr('path/to/file').Get('att')
-att := xyzattr('path/to/file').Set('att', 'val')
+    // List all attributes
+    list, err := store.List()
+}
 ```
 
-Where the 'Get' function automatically determines/verifies the best-available datastore for the particular file.
+## Development
 
-- The behavior should be consistent and safe.
-  Eg: it should determine and cache "best" storage for each filesystem on first access, not with each operation.
-- It should require configuration where no obvious "best" implementation exists.
+This project uses [mise](https://mise.jdx.co/) for development tasks.
 
-## ESSENTIAL REQUIREMENT
+```bash
+# Build the project
+mise run build
 
-### NON-DESTRUCTIVE
+# Run tests
+mise run test
 
-The library must not in any way modify the file's contents themselves.
+# Tidy Go modules
+mise run tidy
+```
 
-- No implemenetations can be considered that would in any way alter the original file.
+## License
 
-## Usability
+BSD 3-Clause License
 
-### As a Library
+Copyright (c) 2026, GNOMATIX
+All rights reserved.
 
-First and foremost, this must function as a library available for use in the development of other cross-platform Golang software.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
 
-- Full, abstracted POSIX-compliant `xattr` functionality is therefore ideal.
-- Clients of the library should not have to care what is going on "under the hood".
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
 
-However, it is worth considering while developing the abstraction layers that:
+2. Redistributions in binary form must reproduce the above copyright notice,   
+   this list of conditions and the following disclaimer in the documentation and/or
+   other materials provided with the distribution.
 
-- Sensible fallback storage layers (eg: database?) might be client-configured / provided.
-- We may want to provide / suggest a fallback storage layer and make it available to the client.
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
 
-### CLI Tools
+---
 
-We should ultimately provide command-line tools that provide the same POSIX-compliant `xattr` functionality that is available on OSes like Linux, Solaris and macOS.
-
-Again, unlike the `xattr` tools, these tools _must_ be runnable, and provide the same functionality on any filesystem on the host OS.
-
-## Sidecar Files
-
-### AVOID SIDECAR FILES
-
-Let's not use sidecar files if we can avoid it.
-
+![Killbots Activate!](./assets/images/gnomatix-killbots-activate-xs.png "Go Team!")
+![GNOMATIX](./assets/images/gnomatix-new-xs.png "GNOMATIX")

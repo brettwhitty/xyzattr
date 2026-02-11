@@ -1,0 +1,19 @@
+[tools]
+go = "latest"
+node = "lts"
+
+[tasks."build"]
+run = "go build ./pkg/xyzattr/..."
+description = "Build the core library"
+
+[tasks."test"]
+run = "go test ./pkg/xyzattr/... ./internal/..."
+description = "Run library and internal tests"
+
+[tasks."tidy"]
+run = "go mod tidy"
+description = "Tidy go modules"
+
+[tasks."lint"]
+run = "go vet ./pkg/xyzattr/... ./internal/..."
+description = "Run static analysis"
