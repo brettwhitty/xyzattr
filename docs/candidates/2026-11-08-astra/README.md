@@ -6,3 +6,5 @@ These complete patches preserve unfinished work from redundant task checkouts. T
 - `windows-boundaries.patch`: Windows boundary candidate and tests; follow-up `dreamfs-x4n.4.6` retains native UNC/network/mounted-volume validation.
 
 The already published repairs in repository history remain the runtime implementation. Original investigation and validation records remain in the DreamFS project vault and evidence cache. No successful native validation is inferred from patch preservation.
+
+`source-files.json` retains the exact original bytes of all 16 changed files as base64 with their recorded hashes. This permits exact reconstruction independently of Git newline normalization when applying the review patches.
