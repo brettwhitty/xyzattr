@@ -32,12 +32,22 @@ var (
 )
 
 func init() {
-	var err error
-	reg, err = fallback.NewRegistryStore()
+	store, err := fallback.NewRegistryStore()
 	if err != nil {
-		// Proceed with registry as nil; native will still be tried.
+		reg = unavailableEngine{err: err}
+		return
 	}
+	reg = store
 }
+
+// unavailableEngine preserves initialization failures at the existing API's
+// error-returning operations. Native engine selection remains independent.
+type unavailableEngine struct{ err error }
+
+func (e unavailableEngine) Get(string, string) ([]byte, error) { return nil, e.err }
+func (e unavailableEngine) Set(string, string, []byte) error   { return e.err }
+func (e unavailableEngine) List(string) ([]string, error)      { return nil, e.err }
+func (e unavailableEngine) Remove(string, string) error        { return e.err }
 
 // At returns a FileStore for the given path, caching the best engine for the filesystem.
 func At(path string) *FileStore {
