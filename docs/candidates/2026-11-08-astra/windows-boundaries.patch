@@ -1,0 +1,845 @@
+diff --git a/internal/engine/windows/ntfs/ads.go b/internal/engine/windows/ntfs/ads.go
+index c279c9d..a8334a3 100644
+--- a/internal/engine/windows/ntfs/ads.go
++++ b/internal/engine/windows/ntfs/ads.go
+@@ -5,30 +5,14 @@
+ package ntfs
+ 
+ import (
++	"errors"
++	"io"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"syscall"
+-	"unsafe"
+ )
+ 
+-var (
+-	modkernel32          = syscall.NewLazyDLL("kernel32.dll")
+-	procFindFirstStreamW = modkernel32.NewProc("FindFirstStreamW")
+-	procFindNextStreamW  = modkernel32.NewProc("FindNextStreamW")
+-	procFindClose        = modkernel32.NewProc("FindClose")
+-)
+-
+-type WIN32_FIND_STREAM_DATA struct {
+-	StreamSize int64
+-	StreamName [260 + 36]uint16
+-}
+-
+-var findNextStreamW = func(handle uintptr, data *WIN32_FIND_STREAM_DATA) (uintptr, error) {
+-	result, _, err := procFindNextStreamW.Call(handle, uintptr(unsafe.Pointer(data)))
+-	return result, err
+-}
+-
+ type ADSStore struct{}
+ 
+ // Resolve the directory separately so a one-character filename cannot become
+@@ -81,7 +65,12 @@ func (s *ADSStore) Get(path string, name string) ([]byte, error) {
+ 	if err != nil {
+ 		return nil, &os.PathError{Op: "getxattr", Path: target, Err: err}
+ 	}
+-	return os.ReadFile(target)
++	file, err := openExistingStream(target, syscall.GENERIC_READ)
++	if err != nil {
++		return nil, &os.PathError{Op: "getxattr", Path: target, Err: err}
++	}
++	value, err := io.ReadAll(file)
++	return value, errors.Join(err, file.Close())
+ }
+ 
+ func (s *ADSStore) Set(path string, name string, value []byte) error {
+@@ -92,44 +81,23 @@ func (s *ADSStore) Set(path string, name string, value []byte) error {
+ 	return os.WriteFile(target, value, 0666)
+ }
+ 
+-func (s *ADSStore) List(path string) ([]string, error) {
+-	path, err := absoluteStreamBase(path)
++func (s *ADSStore) List(path string) (names []string, err error) {
++	path, err = absoluteStreamBase(path)
+ 	if err != nil {
+ 		return nil, &os.PathError{Op: "listxattr", Path: path, Err: err}
+ 	}
+-	pathPtr, err := syscall.UTF16PtrFromString(path)
++	handle, err := openStreamBase(path)
+ 	if err != nil {
+-		return nil, err
+-	}
+-
+-	var data WIN32_FIND_STREAM_DATA
+-	handle, _, err := procFindFirstStreamW.Call(uintptr(unsafe.Pointer(pathPtr)), 0, uintptr(unsafe.Pointer(&data)), 0)
+-	if handle == ^uintptr(0) {
+-		if err == syscall.ERROR_HANDLE_EOF {
+-			return nil, nil
+-		}
+ 		return nil, &os.PathError{Op: "listxattr", Path: path, Err: err}
+ 	}
+-	defer procFindClose.Call(handle)
+-
+-	var streams []string
+-	for {
+-		name := syscall.UTF16ToString(data.StreamName[:])
+-		if name != "" {
+-			parts := strings.Split(name, ":")
+-			if len(parts) >= 2 && parts[1] != "" {
+-				streams = append(streams, parts[1])
+-			}
++	defer func() {
++		err = errors.Join(err, syscall.CloseHandle(handle))
++		if err != nil {
++			names = nil
++			err = &os.PathError{Op: "listxattr", Path: path, Err: err}
+ 		}
+-		res, err := findNextStreamW(handle, &data)
+-		if res == 0 {
+-			if err == syscall.ERROR_HANDLE_EOF {
+-				break
+-			}
+-			return nil, &os.PathError{Op: "listxattr", Path: path, Err: err}
+-		}
+-	}
+-	return streams, nil
++	}()
++	return listStreamNames(handle)
+ }
+ 
+ func (s *ADSStore) Remove(path string, name string) error {
+@@ -137,5 +105,15 @@ func (s *ADSStore) Remove(path string, name string) error {
+ 	if err != nil {
+ 		return &os.PathError{Op: "removexattr", Path: target, Err: err}
+ 	}
+-	return os.Remove(target)
++	const deleteAccess = 0x00010000
++	file, err := openExistingStream(target, deleteAccess)
++	if err != nil {
++		return &os.PathError{Op: "removexattr", Path: target, Err: err}
++	}
++	err = deleteStream(syscall.Handle(file.Fd()))
++	err = errors.Join(err, file.Close())
++	if err != nil {
++		return &os.PathError{Op: "removexattr", Path: target, Err: err}
++	}
++	return nil
+ }
+diff --git a/internal/engine/windows/ntfs/ads_test.go b/internal/engine/windows/ntfs/ads_test.go
+index d5f9678..a0bf902 100644
+--- a/internal/engine/windows/ntfs/ads_test.go
++++ b/internal/engine/windows/ntfs/ads_test.go
+@@ -217,7 +217,7 @@ func TestADSListEmptyFileAndDirectory(t *testing.T) {
+ 	}
+ }
+ 
+-func TestADSListNextErrorDiscardsPartialResult(t *testing.T) {
++func TestADSListQueryErrorDiscardsPartialResult(t *testing.T) {
+ 	path, check := adsFixture(t)
+ 	store := &ADSStore{}
+ 	err := store.Set(path, "user.comment", []byte("retained attribute"))
+@@ -225,17 +225,20 @@ func TestADSListNextErrorDiscardsPartialResult(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	// Native enumeration normally ends at EOF. Inject a continuation failure
+-	// after a real named-stream result, retaining the real handle for FindClose.
+-	nativeNext := findNextStreamW
+-	t.Cleanup(func() { findNextStreamW = nativeNext })
++	// Retain a real named-stream result in the first buffer, then fail the
++	// resized query. No partial names may escape an unsuccessful enumeration.
++	nativeQuery := queryStreamInformation
++	t.Cleanup(func() { queryStreamInformation = nativeQuery })
+ 	calls := 0
+-	findNextStreamW = func(handle uintptr, data *WIN32_FIND_STREAM_DATA) (uintptr, error) {
++	queryStreamInformation = func(handle syscall.Handle, buf []byte) error {
+ 		calls++
+ 		if calls == 2 {
+-			return 0, syscall.ERROR_ACCESS_DENIED
++			return syscall.ERROR_ACCESS_DENIED
+ 		}
+-		return nativeNext(handle, data)
++		if err := nativeQuery(handle, buf); err != nil {
++			return err
++		}
++		return syscall.ERROR_MORE_DATA
+ 	}
+ 	names, err := store.List(path)
+ 	check()
+diff --git a/internal/engine/windows/ntfs/stream_windows.go b/internal/engine/windows/ntfs/stream_windows.go
+new file mode 100644
+index 0000000..354433f
+--- /dev/null
++++ b/internal/engine/windows/ntfs/stream_windows.go
+@@ -0,0 +1,121 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build windows
++
++package ntfs
++
++import (
++	"encoding/binary"
++	"os"
++	"strings"
++	"syscall"
++	"unicode/utf16"
++	"unsafe"
++)
++
++var (
++	modkernel32                      = syscall.NewLazyDLL("kernel32.dll")
++	procGetFileInformationByHandleEx = modkernel32.NewProc("GetFileInformationByHandleEx")
++	procSetFileInformationByHandle   = modkernel32.NewProc("SetFileInformationByHandle")
++)
++
++func openStreamBase(path string) (syscall.Handle, error) {
++	ptr, err := syscall.UTF16PtrFromString(path)
++	if err != nil {
++		return syscall.InvalidHandle, err
++	}
++	// Metadata access only; follow the target without creating a missing base.
++	return syscall.CreateFile(ptr, 0,
++		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
++		nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
++}
++
++func openExistingStream(path string, access uint32) (*os.File, error) {
++	ptr, err := syscall.UTF16PtrFromString(path)
++	if err != nil {
++		return nil, err
++	}
++	// BACKUP_SEMANTICS changes terminal junction ADS resolution. The named
++	// stream is a data stream even when its owning filesystem object is a directory.
++	handle, err := syscall.CreateFile(ptr, access,
++		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
++		nil, syscall.OPEN_EXISTING, 0, 0)
++	if err != nil {
++		return nil, err
++	}
++	return os.NewFile(uintptr(handle), path), nil
++}
++
++var queryStreamInformation = func(handle syscall.Handle, buf []byte) error {
++	const fileStreamInfo = 7
++	result, _, err := procGetFileInformationByHandleEx.Call(uintptr(handle), fileStreamInfo, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
++	if result == 0 {
++		return err
++	}
++	return nil
++}
++
++func listStreamNames(handle syscall.Handle) ([]string, error) {
++	// FILE_STREAM_INFO requires an eight-byte-aligned buffer. Its entries contain
++	// lengths and offsets rather than a terminating NUL for each stream name.
++	words := make([]uint64, 64)
++	for {
++		buf := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
++		err := queryStreamInformation(handle, buf)
++		if err == syscall.ERROR_HANDLE_EOF {
++			return nil, nil
++		}
++		if err == syscall.ERROR_MORE_DATA || err == syscall.ERROR_INSUFFICIENT_BUFFER {
++			maxBuffer := min(uint64(^uint(0)>>1), uint64(0xffffffff))
++			if uint64(len(buf)) > maxBuffer/2 {
++				return nil, err
++			}
++			words = make([]uint64, len(words)*2)
++			continue
++		}
++		if err != nil {
++			return nil, err
++		}
++		return decodeStreamNames(buf)
++	}
++}
++
++func decodeStreamNames(buf []byte) ([]string, error) {
++	var names []string
++	for {
++		const headerSize = 24
++		if len(buf) < headerSize {
++			return nil, syscall.EINVAL
++		}
++		next := uint64(binary.LittleEndian.Uint32(buf))
++		size := uint64(binary.LittleEndian.Uint32(buf[4:]))
++		if size%2 != 0 || size > uint64(len(buf)-headerSize) {
++			return nil, syscall.EINVAL
++		}
++		chars := make([]uint16, int(size/2))
++		for i := range chars {
++			chars[i] = binary.LittleEndian.Uint16(buf[headerSize+2*i:])
++		}
++		parts := strings.SplitN(string(utf16.Decode(chars)), ":", 3)
++		if len(parts) >= 2 && parts[1] != "" {
++			names = append(names, parts[1])
++		}
++		if next == 0 {
++			return names, nil
++		}
++		if next%8 != 0 || next < headerSize+size || next > uint64(len(buf)-headerSize) {
++			return nil, syscall.EINVAL
++		}
++		buf = buf[int(next):]
++	}
++}
++
++func deleteStream(handle syscall.Handle) error {
++	const fileDispositionInfo = 4
++	var deleteFile byte = 1
++	result, _, err := procSetFileInformationByHandle.Call(uintptr(handle), fileDispositionInfo, uintptr(unsafe.Pointer(&deleteFile)), unsafe.Sizeof(deleteFile))
++	if result == 0 {
++		return err
++	}
++	return nil
++}
+diff --git a/internal/engine/windows/ntfs/stream_windows_test.go b/internal/engine/windows/ntfs/stream_windows_test.go
+new file mode 100644
+index 0000000..7eca834
+--- /dev/null
++++ b/internal/engine/windows/ntfs/stream_windows_test.go
+@@ -0,0 +1,100 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build windows
++
++package ntfs
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"os"
++	"slices"
++	"strings"
++	"syscall"
++	"testing"
++)
++
++func TestADSMetadataOperationsWithBaseReader(t *testing.T) {
++	path, check := adsFixture(t)
++	const name = "user.reader"
++	value := []byte("attribute")
++	if err := os.WriteFile(path+":"+name, value, 0600); err != nil {
++		t.Fatal(err)
++	}
++	ptr, _ := syscall.UTF16PtrFromString(path)
++	reader, err := syscall.CreateFile(ptr, syscall.GENERIC_READ, syscall.FILE_SHARE_READ, nil, syscall.OPEN_EXISTING, 0, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer syscall.CloseHandle(reader)
++	store := &ADSStore{}
++	got, err := store.Get(path, name)
++	if err != nil || !bytes.Equal(got, value) {
++		t.Fatalf("Get with base reader=%q,%v", got, err)
++	}
++	names, err := store.List(path)
++	if err != nil || !slices.Equal(names, []string{name}) {
++		t.Fatalf("List with base reader=%q,%v", names, err)
++	}
++	if err := store.Remove(path, name); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := os.ReadFile(path + ":" + name); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("ADS survived Remove=%v", err)
++	}
++	check()
++}
++
++func TestADSRemovePreservesReadOnlyBase(t *testing.T) {
++	path, check := adsFixture(t)
++	const name = "user.readonly"
++	value := []byte("retained attribute")
++	if err := os.WriteFile(path+":"+name, value, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(path, 0444); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := os.Chmod(path, 0600); err != nil {
++			t.Error(err)
++		}
++	})
++	err := (&ADSStore{}).Remove(path, name)
++	if !errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
++		t.Errorf("native readonly removal error=%v", err)
++	}
++	ptr, _ := syscall.UTF16PtrFromString(path)
++	flags, err := syscall.GetFileAttributes(ptr)
++	if err != nil || flags&syscall.FILE_ATTRIBUTE_READONLY == 0 {
++		t.Errorf("base lost READONLY: flags=%#x error=%v", flags, err)
++	}
++	got, err := os.ReadFile(path + ":" + name)
++	if err != nil || !bytes.Equal(got, value) {
++		t.Errorf("denied removal changed ADS=%q,%v", got, err)
++	}
++	check()
++}
++
++func TestADSListLargeNativeRecords(t *testing.T) {
++	path, check := adsFixture(t)
++	var want []string
++	for i := 0; i < 24; i++ {
++		name := fmt.Sprintf("%02d.%s.日本語", i, strings.Repeat("x", 190))
++		if err := os.WriteFile(path+":"+name, []byte{byte(i)}, 0600); err != nil {
++			t.Fatal(err)
++		}
++		want = append(want, name)
++	}
++	names, err := (&ADSStore{}).List(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	slices.Sort(names)
++	slices.Sort(want)
++	if !slices.Equal(names, want) {
++		t.Errorf("List returned %d names, want %d exact names", len(names), len(want))
++	}
++	check()
++}
+diff --git a/pkg/xyzattr/store_windows_boundaries_test.go b/pkg/xyzattr/store_windows_boundaries_test.go
+new file mode 100644
+index 0000000..468156f
+--- /dev/null
++++ b/pkg/xyzattr/store_windows_boundaries_test.go
+@@ -0,0 +1,442 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build windows
++
++package xyzattr
++
++import (
++	"bytes"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"slices"
++	"syscall"
++	"testing"
++
++	"gitea.gnomatix.com/gnomatix/xyzattr/internal/engine/windows/ntfs"
++	"gitea.gnomatix.com/gnomatix/xyzattr/internal/fs"
++)
++
++type nativeBoundaryFixture struct {
++	root, dir, file string
++	links           []string
++}
++
++func newNativeBoundaryFixture(t *testing.T) *nativeBoundaryFixture {
++	t.Helper()
++	root, err := os.MkdirTemp("", "xb-&%XYZATTR_J%!()-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	root, err = filepath.Abs(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	f := &nativeBoundaryFixture{root: root, dir: filepath.Join(root, "target with spaces 日本語")}
++	f.file = filepath.Join(f.dir, "original.bin")
++	t.Cleanup(func() {
++		// Only known newly created objects are removed, without recursive deletion.
++		// Stop before target cleanup if any junction cannot be removed.
++		for i := len(f.links) - 1; i >= 0; i-- {
++			if !f.remove(t, f.links[i]) {
++				return
++			}
++		}
++		for _, p := range []string{f.file, f.dir, f.root} {
++			if !f.remove(t, p) {
++				return
++			}
++		}
++	})
++	if err = os.Mkdir(f.dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err = os.WriteFile(f.file, []byte("original bytes\x00\xff\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return f
++}
++
++func (f *nativeBoundaryFixture) remove(t *testing.T, path string) bool {
++	t.Helper()
++	relative, err := filepath.Rel(f.root, path)
++	if err != nil || !filepath.IsAbs(path) || !filepath.IsLocal(relative) {
++		t.Errorf("refusing cleanup outside fixture: %q (%v)", path, err)
++		return false
++	}
++	if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("non-recursive cleanup %q: %v", path, err)
++		return false
++	}
++	return true
++}
++
++func (f *nativeBoundaryFixture) junction(t *testing.T, name, target string) string {
++	t.Helper()
++	link := filepath.Join(f.root, name)
++	relative, err := filepath.Rel(f.root, link)
++	if err != nil || !filepath.IsLocal(relative) || !filepath.IsAbs(target) {
++		t.Fatal("invalid junction fixture paths")
++	}
++	if _, err = os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("junction destination already exists: %v", err)
++	}
++	if err := os.Mkdir(link, 0700); err != nil {
++		t.Fatal(err)
++	}
++	f.links = append(f.links, link)
++	// Construct a native mount-point reparse record. No command shell interprets
++	// percent, ampersand or other characters in fixture paths.
++	substitute, err := syscall.UTF16FromString(`\??\` + target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	printName, err := syscall.UTF16FromString(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data := make([]byte, 16+2*(len(substitute)+len(printName)))
++	if len(data) > syscall.MAXIMUM_REPARSE_DATA_BUFFER_SIZE {
++		t.Fatal("junction path exceeds native reparse buffer")
++	}
++	const ioReparseTagMountPoint = 0xa0000003
++	const fsctlSetReparsePoint = 0x000900a4
++	binary.LittleEndian.PutUint32(data[0:4], ioReparseTagMountPoint)
++	binary.LittleEndian.PutUint16(data[4:6], uint16(len(data)-8))
++	binary.LittleEndian.PutUint16(data[10:12], uint16(2*(len(substitute)-1)))
++	binary.LittleEndian.PutUint16(data[12:14], uint16(2*len(substitute)))
++	binary.LittleEndian.PutUint16(data[14:16], uint16(2*(len(printName)-1)))
++	for i, value := range append(substitute, printName...) {
++		binary.LittleEndian.PutUint16(data[16+2*i:], value)
++	}
++	linkPtr, err := syscall.UTF16PtrFromString(link)
++	if err != nil {
++		t.Fatal(err)
++	}
++	handle, err := syscall.CreateFile(linkPtr, syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_OPEN_REPARSE_POINT|syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var returned uint32
++	setErr := syscall.DeviceIoControl(handle, fsctlSetReparsePoint, &data[0], uint32(len(data)), nil, 0, &returned, nil)
++	closeErr := syscall.CloseHandle(handle)
++	if err := errors.Join(setErr, closeErr); err != nil {
++		t.Fatalf("create native junction: %v", err)
++	}
++	return link
++}
++
++// A wrong volume/engine choice, alias identity or ADS destination must fail
++// through public operations and direct inspection of the intended target.
++func exerciseNativeBoundaryAlias(t *testing.T, target, alias string) {
++	t.Helper()
++	original, err := os.Stat(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var originalBytes []byte
++	var originalChildren []string
++	if original.IsDir() {
++		entries, err := os.ReadDir(target)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, e := range entries {
++			originalChildren = append(originalChildren, e.Name())
++		}
++	} else {
++		originalBytes, err = os.ReadFile(target)
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++	check := func() {
++		t.Helper()
++		current, err := os.Stat(target)
++		if err != nil {
++			t.Fatal(err)
++		}
++		aliased, err := os.Stat(alias)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !os.SameFile(original, current) || !os.SameFile(original, aliased) {
++			t.Fatal("original/alias file identity changed")
++		}
++		if original.IsDir() {
++			entries, err := os.ReadDir(target)
++			if err != nil {
++				t.Fatal(err)
++			}
++			names := make([]string, 0, len(entries))
++			for _, e := range entries {
++				names = append(names, e.Name())
++			}
++			if !slices.Equal(names, originalChildren) {
++				t.Fatalf("directory contents changed: %q", names)
++			}
++		} else {
++			got, err := os.ReadFile(target)
++			if err != nil || !bytes.Equal(got, originalBytes) {
++				t.Fatalf("original content changed: %q, %v", got, err)
++			}
++		}
++	}
++	check()
++	filesystem, err := fs.Detect(alias)
++	if err != nil || filesystem != fs.NTFS {
++		t.Fatalf("Detect(%q)=%q,%v; want native NTFS", alias, filesystem, err)
++	}
++	store := At(alias)
++	if _, ok := store.engine.(*ntfs.ADSStore); !ok {
++		t.Fatalf("alias selected %T instead of ADS", store.engine)
++	}
++	names := []string{"user.binary", "méta.日本語"}
++	for i, name := range names {
++		value := [][]byte{{0, 255, 1}, {}}[i]
++		if err := store.Set(name, value); err != nil {
++			t.Fatalf("Set: %v", err)
++		}
++		check()
++		raw, err := os.ReadFile(target + ":" + name)
++		if err != nil || !bytes.Equal(raw, value) {
++			t.Fatalf("wrong raw ADS destination/value: %q,%v", raw, err)
++		}
++		got, err := At(alias).Get(name)
++		if err != nil || !bytes.Equal(got, value) {
++			t.Fatalf("reopen Get=%v,%v want %v", got, err, value)
++		}
++		check()
++	}
++	listed, err := store.List()
++	check()
++	slices.Sort(listed)
++	want := slices.Clone(names)
++	slices.Sort(want)
++	if err != nil || !slices.Equal(listed, want) {
++		t.Fatalf("List=%q,%v want %q", listed, err, want)
++	}
++	if err := At(target).Set(names[0], []byte("replacement")); err != nil {
++		t.Fatal(err)
++	}
++	check()
++	if got, err := store.Get(names[0]); err != nil || string(got) != "replacement" {
++		t.Fatalf("cross-alias overwrite=%q,%v", got, err)
++	}
++	for _, name := range names {
++		if err := store.Remove(name); err != nil {
++			t.Fatal(err)
++		}
++		check()
++		if _, err := os.ReadFile(target + ":" + name); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("raw stream survived Remove: %v", err)
++		}
++		if _, err := At(alias).Get(name); !errors.Is(err, os.ErrNotExist) {
++			t.Fatalf("missing attribute error=%v", err)
++		}
++	}
++	listed, err = store.List()
++	if err != nil || len(listed) != 0 {
++		t.Fatalf("empty List=%q,%v", listed, err)
++	}
++	check()
++	missing := alias + ".missing"
++	listed, err = At(missing).List()
++	if !errors.Is(err, os.ErrNotExist) || len(listed) != 0 {
++		t.Errorf("missing-path List=%q,%v", listed, err)
++	}
++	if !original.IsDir() {
++		listed, err = At(filepath.Join(alias, "child")).List()
++		if !errors.Is(err, os.ErrNotExist) || len(listed) != 0 {
++			t.Errorf("invalid-child List=%q,%v", listed, err)
++		}
++	}
++	check()
++	t.Logf("native alias passed: target=%q alias=%q", target, alias)
++}
++
++func TestFileStoreADSJunctionAliases(t *testing.T) {
++	t.Setenv("XYZATTR_J", "must-not-expand")
++	fixture := newNativeBoundaryFixture(t)
++	single := fixture.junction(t, "single link", fixture.dir)
++	chained := fixture.junction(t, "chained link", single)
++	for _, tc := range []struct{ name, path string }{{"direct", fixture.dir}, {"single", single}, {"chained", chained}} {
++		for _, extended := range []bool{false, true} {
++			prefix := ""
++			suffix := ""
++			if extended {
++				prefix = `\\?\`
++				suffix = "-extended"
++			}
++			t.Run(tc.name+suffix+"/file", func(t *testing.T) {
++				exerciseNativeBoundaryAlias(t, fixture.file, prefix+filepath.Join(tc.path, filepath.Base(fixture.file)))
++			})
++			t.Run(tc.name+suffix+"/directory", func(t *testing.T) { exerciseNativeBoundaryAlias(t, fixture.dir, prefix+tc.path) })
++		}
++	}
++}
++
++func TestFileStoreADSJunctionOperations(t *testing.T) {
++	for _, operation := range []string{"Get", "List", "Remove"} {
++		t.Run(operation, func(t *testing.T) {
++			f := newNativeBoundaryFixture(t)
++			link := f.junction(t, "operation link", f.dir)
++			const key = "user.independent"
++			value := []byte("target bytes\x00\xff")
++			if err := os.WriteFile(f.dir+":"+key, value, 0600); err != nil {
++				t.Fatal(err)
++			}
++			before, err := os.Stat(f.dir)
++			if err != nil {
++				t.Fatal(err)
++			}
++			store := At(link)
++			if _, ok := store.engine.(*ntfs.ADSStore); !ok {
++				t.Fatalf("unexpected engine %T", store.engine)
++			}
++			switch operation {
++			case "Get":
++				got, err := store.Get(key)
++				if err != nil || !bytes.Equal(got, value) {
++					t.Errorf("Get=%q,%v want %q,nil", got, err, value)
++				}
++			case "List":
++				got, err := store.List()
++				if err != nil || !slices.Equal(got, []string{key}) {
++					t.Errorf("List=%q,%v want [%q],nil", got, err, key)
++				}
++			case "Remove":
++				err := store.Remove(key)
++				if err != nil {
++					t.Errorf("Remove=%v", err)
++				}
++				if _, err = os.ReadFile(f.dir + ":" + key); !errors.Is(err, os.ErrNotExist) {
++					t.Errorf("target ADS survived Remove: %v", err)
++				}
++			}
++			after, err := os.Stat(link)
++			if err != nil || !os.SameFile(before, after) {
++				t.Errorf("target identity changed: %v", err)
++			}
++			if got, err := os.ReadFile(f.file); err != nil || !bytes.Equal(got, []byte("original bytes\x00\xff\n")) {
++				t.Errorf("original bytes changed: %q,%v", got, err)
++			}
++		})
++	}
++}
++
++func TestADSJunctionBrokenTarget(t *testing.T) {
++	for _, operation := range []string{"Get", "Set", "List", "Remove"} {
++		t.Run(operation, func(t *testing.T) {
++			f := newNativeBoundaryFixture(t)
++			link := f.junction(t, "broken", filepath.Join(f.root, "absent"))
++			// Bind the owning ADS engine explicitly: FileStore detection-failure fallback
++			// remains a separate policy boundary. These are target-following operations.
++			store := &ntfs.ADSStore{}
++			var err error
++			switch operation {
++			case "Get":
++				_, err = store.Get(link, "user.key")
++			case "Set":
++				err = store.Set(link, "user.key", []byte("value"))
++			case "List":
++				var names []string
++				names, err = store.List(link)
++				if len(names) != 0 {
++					t.Errorf("partial list=%q", names)
++				}
++			case "Remove":
++				err = store.Remove(link, "user.key")
++			}
++			if !errors.Is(err, os.ErrNotExist) {
++				t.Errorf("%s broken target error=%v want not-exist", operation, err)
++			}
++		})
++	}
++}
++
++func TestJunctionFixtureLiteralPaths(t *testing.T) {
++	t.Setenv("XYZATTR_J", "must-not-expand")
++	f := newNativeBoundaryFixture(t)
++	link := f.junction(t, "&%XYZATTR_J%!()", f.dir)
++	got, err := os.Stat(link)
++	if err != nil {
++		t.Fatal(err)
++	}
++	target, err := os.Stat(f.dir)
++	if err != nil || !os.SameFile(got, target) {
++		t.Fatalf("literal junction target mismatch: %v", err)
++	}
++}
++
++func TestADSSetMissingBase(t *testing.T) {
++	f := newNativeBoundaryFixture(t)
++	missing := filepath.Join(f.root, "absent-file")
++	err := (&ntfs.ADSStore{}).Set(missing, "user.key", []byte("attribute"))
++	if !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("Set missing base=%v want not-exist", err)
++	}
++	if info, statErr := os.Stat(missing); !errors.Is(statErr, os.ErrNotExist) {
++		t.Errorf("Set created missing base: info=%v error=%v", info, statErr)
++		data, readErr := os.ReadFile(missing + ":user.key")
++		t.Logf("created target ADS=%q,%v", data, readErr)
++	}
++}
++
++func TestFileStoreADSRemovedBase(t *testing.T) {
++	f := newNativeBoundaryFixture(t)
++	path := filepath.Join(f.root, "removed")
++	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	store := At(path)
++	if _, ok := store.engine.(*ntfs.ADSStore); !ok {
++		t.Fatalf("engine=%T", store.engine)
++	}
++	if err := os.Remove(path); err != nil {
++		t.Fatal(err)
++	}
++	if err := store.Set("user.key", nil); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("Set on removed base=%v", err)
++	}
++	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("base recreated: %v", err)
++	}
++}
++
++func TestFileStoreADSJunctionStreamSpelling(t *testing.T) {
++	f := newNativeBoundaryFixture(t)
++	link := f.junction(t, "typed streams", f.dir)
++	for _, extended := range []bool{false, true} {
++		for _, name := range []string{".", "..", " ", ". ", "...", "méta.日本語"} {
++			t.Run(fmt.Sprintf("extended=%t/%q", extended, name), func(t *testing.T) {
++				alias := link
++				if extended {
++					alias = `\\?\` + alias
++				}
++				// The explicit stream type keeps ordinary dot/space names literal.
++				store := At(alias + ":" + name)
++				value := []byte("named attribute")
++				if err := store.Set("$DATA", value); err != nil {
++					t.Fatal(err)
++				}
++				got, err := store.Get("$DATA")
++				if err != nil || !bytes.Equal(got, value) {
++					t.Fatalf("Get=%q,%v", got, err)
++				}
++				raw, err := os.ReadFile(`\\?\` + f.dir + ":" + name + ":$DATA")
++				if err != nil || !bytes.Equal(raw, value) {
++					t.Fatalf("raw target=%q,%v", raw, err)
++				}
++				if err := store.Remove("$DATA"); err != nil {
++					t.Fatal(err)
++				}
++				if _, err := os.ReadFile(`\\?\` + f.dir + ":" + name + ":$DATA"); !errors.Is(err, os.ErrNotExist) {
++					t.Errorf("target stream survived=%v", err)
++				}
++			})
++		}
++	}
++}

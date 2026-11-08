@@ -1,0 +1,91 @@
+{
+  "created": "2026-11-08T23:29:23.897Z",
+  "records": [
+    {
+      "candidate": "darwin-native",
+      "base": "6b67b2e31a336ba300dc0c5b8bc356762d437cd3",
+      "sourceCheckout": "C:\\Users\\brett\\repos\\dreamfs\\.cache\\worktrees\\xyzattr-ads",
+      "beads": "dreamfs-x4n.4.3",
+      "patch": "darwin-native.patch",
+      "sha256": "8b5a603594462bd8513f0195cf60fbc37fb5d033a274b9c9790a34fee53a740a",
+      "files": [
+        {
+          "path": "go.sum",
+          "sha256": "3f12c126de18d4e955eaf8871973b91b571eb0490543644552909786af8b232e"
+        },
+        {
+          "path": "internal/engine/darwin/apfs/stubs_test.go",
+          "sha256": "d5767d0a939538b30d6754f62cb2e458d8562ca858de6209f38a461a0dbf4821"
+        },
+        {
+          "path": "internal/engine/darwin/apfs/xattr_size_test.go",
+          "sha256": "4388c9cef2b8a238bbaa4df8851c6f7eedf4adadf06565eca902a44bf52b174e"
+        },
+        {
+          "path": "internal/engine/darwin/apfs/xattr_test.go",
+          "sha256": "93162d80dfc8eb29daca73aa8745bb7aa2525d4d0a14066527e946a3df81c0ec"
+        },
+        {
+          "path": "internal/engine/linux/ext4/stubs_test.go",
+          "sha256": "e484095f1eb23abcf941493716eb24d1ca7c7173975974d7d0de0921cbbc7888"
+        },
+        {
+          "path": "pkg/xyzattr/store_darwin_test.go",
+          "sha256": "ac13e8cc110a80d8b95043baa655fea1765753678b3a44ba2ab42408694b0559"
+        },
+        {
+          "path": "go.mod",
+          "sha256": "d8611c2fe976e912a41e1c265feaa29e3b76379b3a4723dd2956762bd64c132c"
+        },
+        {
+          "path": "internal/engine/darwin/apfs/stubs.go",
+          "sha256": "0733a182f11edd1251058d6c4dae8fd3c9022201193d8bd6bbea4fe6599e6d8e"
+        },
+        {
+          "path": "internal/engine/darwin/apfs/xattr.go",
+          "sha256": "87018cda91b45749df70f018b7ec8f1e2d23f9c9c84e7883eefa25c1d388341c"
+        },
+        {
+          "path": "internal/engine/linux/ext4/stubs.go",
+          "sha256": "3d9eae7e1a940055246b88789b30af6bf748f632b00cd278a5da6b6b3c7283ed"
+        },
+        {
+          "path": "internal/fs/detect_darwin.go",
+          "sha256": "e1c70ba478831b75e2333aaa8af0f52d33b160ba9aa3ed3795b97b2a3e41700c"
+        }
+      ],
+      "applicationStatus": "unfinished candidate; not installed into runtime by this archive"
+    },
+    {
+      "candidate": "windows-boundaries",
+      "base": "7abc5f1ca783c319f9f0b2a637c36f91e7705d1e",
+      "sourceCheckout": "C:\\Users\\brett\\repos\\dreamfs\\.cache\\worktrees\\xyzattr-remaining-stubs",
+      "beads": "dreamfs-x4n.4.6",
+      "patch": "windows-boundaries.patch",
+      "sha256": "89633dd30a7a95cb9ecde935411cf481f137bab7644ab4d2511bf1f8e6dab097",
+      "files": [
+        {
+          "path": "internal/engine/windows/ntfs/stream_windows.go",
+          "sha256": "644cb9d238d47f422f4e638dc9165ba74efbda2329b92e1564adc8f0d180090d"
+        },
+        {
+          "path": "internal/engine/windows/ntfs/stream_windows_test.go",
+          "sha256": "4fddfca914d0f9d42b6b8f5b03a05d4319ceb9d5dee2538f0bcc0cf7b98f4da4"
+        },
+        {
+          "path": "pkg/xyzattr/store_windows_boundaries_test.go",
+          "sha256": "03236a5906404c1d80fd4304e608fdd588d5a313f2b119c3ae14d9254311c246"
+        },
+        {
+          "path": "internal/engine/windows/ntfs/ads.go",
+          "sha256": "97a6d087282249a99402fc2a092bee7b0a1d3bf4389f677cb87e3c8856aeffed"
+        },
+        {
+          "path": "internal/engine/windows/ntfs/ads_test.go",
+          "sha256": "4c5755b9044c8ea1ae945a1eff3566f6be661258b5b118aa858959df7978d937"
+        }
+      ],
+      "applicationStatus": "unfinished candidate; not installed into runtime by this archive"
+    }
+  ]
+}

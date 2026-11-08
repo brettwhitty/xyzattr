@@ -1,0 +1,896 @@
+diff --git a/go.mod b/go.mod
+index ca8230b..036885f 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,3 +1,5 @@
+ module gitea.gnomatix.com/gnomatix/xyzattr
+ 
+ go 1.25.0
++
++require golang.org/x/sys v0.42.0
+diff --git a/internal/engine/darwin/apfs/stubs.go b/internal/engine/darwin/apfs/stubs.go
+index 2d7d0ea..b3e1e2f 100644
+--- a/internal/engine/darwin/apfs/stubs.go
++++ b/internal/engine/darwin/apfs/stubs.go
+@@ -9,10 +9,10 @@ import "errors"
+ type XattrStore struct{}
+ 
+ func (s *XattrStore) Get(path string, name string) ([]byte, error) {
+-	return nil, errors.New("not implemented")
++	return nil, errors.ErrUnsupported
+ }
+ func (s *XattrStore) Set(path string, name string, value []byte) error {
+-	return errors.New("not implemented")
++	return errors.ErrUnsupported
+ }
+-func (s *XattrStore) List(path string) ([]string, error)    { return nil, nil }
+-func (s *XattrStore) Remove(path string, name string) error { return nil }
++func (s *XattrStore) List(path string) ([]string, error)    { return nil, errors.ErrUnsupported }
++func (s *XattrStore) Remove(path string, name string) error { return errors.ErrUnsupported }
+diff --git a/internal/engine/darwin/apfs/xattr.go b/internal/engine/darwin/apfs/xattr.go
+index 7e61ec8..59d4ddb 100644
+--- a/internal/engine/darwin/apfs/xattr.go
++++ b/internal/engine/darwin/apfs/xattr.go
+@@ -4,9 +4,59 @@
+ 
+ package apfs
+ 
++import "golang.org/x/sys/unix"
++
++var (
++	getxattr  = unix.Getxattr
++	listxattr = unix.Listxattr
++)
++
+ type XattrStore struct{}
+ 
+-func (s *XattrStore) Get(path string, name string) ([]byte, error)     { return nil, nil }
+-func (s *XattrStore) Set(path string, name string, value []byte) error { return nil }
+-func (s *XattrStore) List(path string) ([]string, error)               { return nil, nil }
+-func (s *XattrStore) Remove(path string, name string) error            { return nil }
++func (s *XattrStore) Get(path string, name string) ([]byte, error) {
++	size, err := getxattr(path, name, nil)
++	if err != nil {
++		return nil, err
++	}
++	if size == 0 {
++		return []byte{}, nil
++	}
++	buf := make([]byte, size)
++	n, err := getxattr(path, name, buf)
++	if err != nil {
++		return nil, err
++	}
++	return buf[:n], nil
++}
++
++func (s *XattrStore) Set(path string, name string, value []byte) error {
++	return unix.Setxattr(path, name, value, 0)
++}
++
++func (s *XattrStore) List(path string) ([]string, error) {
++	size, err := listxattr(path, nil)
++	if err != nil {
++		return nil, err
++	}
++	if size == 0 {
++		return []string{}, nil
++	}
++	buf := make([]byte, size)
++	n, err := listxattr(path, buf)
++	if err != nil {
++		return nil, err
++	}
++	var names []string
++	start := 0
++	for i, b := range buf[:n] {
++		if b == 0 {
++			names = append(names, string(buf[start:i]))
++			start = i + 1
++		}
++	}
++	return names, nil
++}
++
++func (s *XattrStore) Remove(path string, name string) error {
++	return unix.Removexattr(path, name)
++}
+diff --git a/internal/engine/linux/ext4/stubs.go b/internal/engine/linux/ext4/stubs.go
+index 644ac38..c26239c 100644
+--- a/internal/engine/linux/ext4/stubs.go
++++ b/internal/engine/linux/ext4/stubs.go
+@@ -9,10 +9,10 @@ import "errors"
+ type XattrStore struct{}
+ 
+ func (s *XattrStore) Get(path string, name string) ([]byte, error) {
+-	return nil, errors.New("not implemented")
++	return nil, errors.ErrUnsupported
+ }
+ func (s *XattrStore) Set(path string, name string, value []byte) error {
+-	return errors.New("not implemented")
++	return errors.ErrUnsupported
+ }
+-func (s *XattrStore) List(path string) ([]string, error)    { return nil, nil }
+-func (s *XattrStore) Remove(path string, name string) error { return nil }
++func (s *XattrStore) List(path string) ([]string, error)    { return nil, errors.ErrUnsupported }
++func (s *XattrStore) Remove(path string, name string) error { return errors.ErrUnsupported }
+diff --git a/internal/fs/detect_darwin.go b/internal/fs/detect_darwin.go
+index 030cf32..6057bcf 100644
+--- a/internal/fs/detect_darwin.go
++++ b/internal/fs/detect_darwin.go
+@@ -14,15 +14,15 @@ func detectDarwin(path string) (Type, error) {
+ 		return Unknown, err
+ 	}
+ 
+-	name := ""
++	name := make([]byte, 0, len(stat.Fstypename))
+ 	for _, b := range stat.Fstypename {
+ 		if b == 0 {
+ 			break
+ 		}
+-		name += string(b)
++		name = append(name, byte(b))
+ 	}
+ 
+-	switch name {
++	switch string(name) {
+ 	case "apfs":
+ 		return APFS, nil
+ 	case "hfs":
+diff --git a/go.sum b/go.sum
+new file mode 100644
+index 0000000..d2913d5
+--- /dev/null
++++ b/go.sum
+@@ -0,0 +1,2 @@
++golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=
++golang.org/x/sys v0.42.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+diff --git a/internal/engine/darwin/apfs/stubs_test.go b/internal/engine/darwin/apfs/stubs_test.go
+new file mode 100644
+index 0000000..6ad2183
+--- /dev/null
++++ b/internal/engine/darwin/apfs/stubs_test.go
+@@ -0,0 +1,66 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build !darwin
++
++package apfs
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestUnsupportedOperations(t *testing.T) {
++	root := t.TempDir()
++	path := filepath.Join(root, "original")
++	original := []byte("original\x00content\xff")
++	if err := os.WriteFile(path, original, 0600); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := &XattrStore{}
++	for _, op := range []struct {
++		name string
++		call func() error
++	}{
++		{"Get", func() error {
++			value, e := s.Get(path, "attribute")
++			if value != nil {
++				t.Errorf("unsupported Get returned %x", value)
++			}
++			return e
++		}},
++		{"Set", func() error { return s.Set(path, "attribute", []byte("value")) }},
++		{"List", func() error {
++			names, e := s.List(path)
++			if names != nil {
++				t.Errorf("unsupported List returned %q", names)
++			}
++			return e
++		}},
++		{"Remove", func() error { return s.Remove(path, "attribute") }},
++	} {
++		t.Run(op.name, func(t *testing.T) {
++			if err := op.call(); !errors.Is(err, errors.ErrUnsupported) {
++				t.Errorf("got %v; want ErrUnsupported", err)
++			}
++		})
++	}
++	current, err := os.Stat(path)
++	if err != nil || !os.SameFile(info, current) {
++		t.Errorf("original identity changed: %v", err)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil || !bytes.Equal(got, original) {
++		t.Errorf("original content changed: %x, %v", got, err)
++	}
++	entries, err := os.ReadDir(root)
++	if err != nil || len(entries) != 1 || entries[0].Name() != "original" {
++		t.Errorf("target sidecars created: %v, %v", entries, err)
++	}
++}
+diff --git a/internal/engine/darwin/apfs/xattr_size_test.go b/internal/engine/darwin/apfs/xattr_size_test.go
+new file mode 100644
+index 0000000..10198ab
+--- /dev/null
++++ b/internal/engine/darwin/apfs/xattr_size_test.go
+@@ -0,0 +1,129 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build darwin
++
++package apfs
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"slices"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// Each case changes the real attribute between the native size and data calls.
++// This catches stale buffer lengths, hidden ERANGE/ENOATTR, and padded results.
++func TestNativeGetSizeChanges(t *testing.T) {
++	for _, tc := range []struct {
++		name                 string
++		initial, replacement []byte
++		remove               bool
++		wantErr              error
++	}{
++		{"shrink", []byte("longer value"), []byte{0, 255}, false, nil},
++		{"becomes-empty", []byte("longer value"), []byte{}, false, nil},
++		{"growth", []byte("x"), []byte("too long for probed buffer"), false, unix.ERANGE},
++		{"removed", []byte("value"), nil, true, unix.ENOATTR},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			path, check := nativeFixture(t, false)
++			const name = "org.gnomatix.size-change"
++			if err := unix.Setxattr(path, name, tc.initial, 0); err != nil {
++				t.Fatal(err)
++			}
++			original := getxattr
++			t.Cleanup(func() { getxattr = original })
++			getxattr = func(p, n string, dest []byte) (int, error) {
++				size, err := unix.Getxattr(p, n, dest)
++				if dest == nil && err == nil {
++					if tc.remove {
++						err = unix.Removexattr(p, n)
++					} else {
++						err = unix.Setxattr(p, n, tc.replacement, 0)
++					}
++					if err != nil {
++						t.Fatalf("mutating native attribute: %v", err)
++					}
++				}
++				return size, err
++			}
++			got, err := (&XattrStore{}).Get(path, name)
++			if !errors.Is(err, tc.wantErr) {
++				t.Fatalf("Get error=%v; want %v", err, tc.wantErr)
++			}
++			if tc.wantErr != nil {
++				if got != nil {
++					t.Errorf("Get exposed buffer on error: %x", got)
++				}
++			} else if !bytes.Equal(got, tc.replacement) {
++				t.Errorf("Get=%x; want %x", got, tc.replacement)
++			}
++			check()
++		})
++	}
++}
++
++func TestNativeListSizeChanges(t *testing.T) {
++	for _, change := range []string{"shrink", "growth", "path-renamed"} {
++		t.Run(change, func(t *testing.T) {
++			path, check := nativeFixture(t, false)
++			moved := false
++			restore := func() {
++				if moved {
++					if err := os.Rename(path+".moved", path); err != nil {
++						t.Fatal(err)
++					}
++					moved = false
++				}
++			}
++			t.Cleanup(restore)
++			const name = "org.gnomatix.list-change"
++			if err := unix.Setxattr(path, name, []byte("value"), 0); err != nil {
++				t.Fatal(err)
++			}
++			before := nativeNames(t, path)
++			original := listxattr
++			t.Cleanup(func() { listxattr = original })
++			listxattr = func(p string, dest []byte) (int, error) {
++				size, err := unix.Listxattr(p, dest)
++				if dest == nil && err == nil {
++					switch change {
++					case "shrink":
++						err = unix.Removexattr(p, name)
++					case "growth":
++						err = unix.Setxattr(p, "org.gnomatix.another-long-attribute-name", []byte("value"), 0)
++					case "path-renamed":
++						err = os.Rename(p, p+".moved")
++						moved = err == nil
++					}
++					if err != nil {
++						t.Fatalf("mutating native attributes: %v", err)
++					}
++				}
++				return size, err
++			}
++			names, err := (&XattrStore{}).List(path)
++			switch change {
++			case "shrink":
++				want := slices.DeleteFunc(before, func(n string) bool { return n == name })
++				slices.Sort(names)
++				if err != nil || !slices.Equal(names, want) {
++					t.Errorf("List=%q, %v; want %q", names, err, want)
++				}
++			case "growth":
++				if !errors.Is(err, unix.ERANGE) || names != nil {
++					t.Errorf("List=%q, %v; want nil, ERANGE", names, err)
++				}
++			case "path-renamed":
++				if !errors.Is(err, unix.ENOENT) || names != nil {
++					t.Errorf("List=%q, %v; want nil, ENOENT", names, err)
++				}
++			}
++			restore()
++			check()
++		})
++	}
++}
+diff --git a/internal/engine/darwin/apfs/xattr_test.go b/internal/engine/darwin/apfs/xattr_test.go
+new file mode 100644
+index 0000000..3ae9090
+--- /dev/null
++++ b/internal/engine/darwin/apfs/xattr_test.go
+@@ -0,0 +1,273 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build darwin
++
++package apfs
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"slices"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++func nativeFixture(t *testing.T, directory bool) (string, func()) {
++	t.Helper()
++	root := t.TempDir()
++	path := filepath.Join(root, "original")
++	original := []byte("original\x00content\xff")
++	if directory {
++		if err := os.Mkdir(path, 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(filepath.Join(path, "child"), original, 0600); err != nil {
++			t.Fatal(err)
++		}
++	} else if err := os.WriteFile(path, original, 0600); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var stat unix.Statfs_t
++	if err := unix.Statfs(path, &stat); err != nil {
++		t.Fatal(err)
++	}
++	filesystem := unix.ByteSliceToString(stat.Fstypename[:])
++	t.Logf("fixture=%s filesystem=%s uid=%d", path, filesystem, os.Geteuid())
++	if filesystem != "apfs" && filesystem != "hfs" {
++		t.Fatalf("native fixture needs APFS or HFS; got %s", filesystem)
++	}
++	check := func() {
++		t.Helper()
++		current, err := os.Stat(path)
++		if err != nil || !os.SameFile(info, current) {
++			t.Errorf("original identity changed: %v", err)
++			return
++		}
++		contentPath := path
++		if directory {
++			contentPath = filepath.Join(path, "child")
++			entries, err := os.ReadDir(path)
++			if err != nil || len(entries) != 1 || entries[0].Name() != "child" {
++				t.Errorf("directory entries changed: %v, %v", entries, err)
++			}
++		}
++		content, err := os.ReadFile(contentPath)
++		if err != nil || !bytes.Equal(content, original) {
++			t.Errorf("original content changed: %x, %v", content, err)
++		}
++		entries, err := os.ReadDir(root)
++		if err != nil || len(entries) != 1 || entries[0].Name() != "original" {
++			t.Errorf("unexpected target sidecar: %v, %v", entries, err)
++		}
++	}
++	t.Cleanup(check)
++	return path, check
++}
++
++func nativeNames(t *testing.T, path string) []string {
++	t.Helper()
++	buf := make([]byte, 64*1024)
++	n, err := unix.Listxattr(path, buf)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var names []string
++	for _, name := range bytes.Split(buf[:n], []byte{0}) {
++		if len(name) != 0 {
++			names = append(names, string(name))
++		}
++	}
++	slices.Sort(names)
++	return names
++}
++
++func TestNativeRoundTrip(t *testing.T) {
++	for _, kind := range []string{"file", "directory"} {
++		t.Run(kind, func(t *testing.T) {
++			path, check := nativeFixture(t, kind == "directory")
++			s := &XattrStore{}
++			before := nativeNames(t, path)
++			values := []struct {
++				name  string
++				value []byte
++			}{
++				{"org.gnomatix.binary", []byte{0, 255, 1, 0}},
++				{"org.gnomatix.empty", []byte{}},
++				{"org.gnomatix.nil", nil},
++				{"org.gnomatix.é", []byte("UTF-8 name")},
++				{"org.gnomatix.large", bytes.Repeat([]byte{0, 128, 255, 1}, 2048)},
++			}
++			wantNames := slices.Clone(before)
++			for _, tc := range values {
++				if err := s.Set(path, tc.name, tc.value); err != nil {
++					t.Fatalf("Set %s: %v", tc.name, err)
++				}
++				check()
++				buf := make([]byte, len(tc.value)+1)
++				n, err := unix.Getxattr(path, tc.name, buf)
++				if err != nil || n < 0 || n > len(buf) {
++					t.Fatalf("native read %s: n=%d err=%v", tc.name, n, err)
++				}
++				if !bytes.Equal(buf[:n], tc.value) {
++					t.Errorf("native read %s: %x; want %x", tc.name, buf[:n], tc.value)
++				}
++				got, err := (&XattrStore{}).Get(path, tc.name)
++				if err != nil || !bytes.Equal(got, tc.value) {
++					t.Errorf("reopened Get %s: %x, %v; want %x", tc.name, got, err, tc.value)
++				}
++				wantNames = append(wantNames, tc.name)
++			}
++			// A native write must be visible through the library too.
++			if err := unix.Setxattr(path, "org.gnomatix.external", []byte("outside"), 0); err != nil {
++				t.Fatal(err)
++			}
++			got, err := s.Get(path, "org.gnomatix.external")
++			if err != nil || string(got) != "outside" {
++				t.Errorf("native-seeded Get: %q, %v", got, err)
++			}
++			wantNames = append(wantNames, "org.gnomatix.external")
++			slices.Sort(wantNames)
++			names, err := s.List(path)
++			slices.Sort(names)
++			if err != nil || !slices.Equal(names, wantNames) {
++				t.Errorf("List=%q, %v; want %q", names, err, wantNames)
++			}
++			if err := s.Set(path, values[0].name, []byte("replacement")); err != nil {
++				t.Fatal(err)
++			}
++			got, err = s.Get(path, values[0].name)
++			if err != nil || string(got) != "replacement" {
++				t.Errorf("replace: %q, %v", got, err)
++			}
++			if err := s.Remove(path, "org.gnomatix.external"); err != nil {
++				t.Fatal(err)
++			}
++			for _, tc := range values {
++				if err := s.Remove(path, tc.name); err != nil {
++					t.Fatal(err)
++				}
++				if _, err := unix.Getxattr(path, tc.name, nil); !errors.Is(err, unix.ENOATTR) {
++					t.Errorf("native removal %s: %v", tc.name, err)
++				}
++				if _, err := s.Get(path, tc.name); !errors.Is(err, unix.ENOATTR) {
++					t.Errorf("Get removed %s: %v", tc.name, err)
++				}
++				if err := s.Remove(path, tc.name); !errors.Is(err, unix.ENOATTR) {
++					t.Errorf("Remove missing %s: %v", tc.name, err)
++				}
++				check()
++			}
++			names, err = s.List(path)
++			slices.Sort(names)
++			if err != nil || !slices.Equal(names, before) {
++				t.Errorf("final List=%q, %v; want %q", names, err, before)
++			}
++			check()
++		})
++	}
++}
++
++func TestNativeErrors(t *testing.T) {
++	path, check := nativeFixture(t, false)
++	s := &XattrStore{}
++	const name = "org.gnomatix.error-control"
++	if err := unix.Setxattr(path, name, []byte("preserve"), 0); err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range []struct {
++		label, path, name string
++		err               error
++	}{
++		{"missing-path", path + "-missing", name, unix.ENOENT},
++		{"not-directory", filepath.Join(path, "child"), name, unix.ENOTDIR},
++		{"nul-path", path + "\x00suffix", name, unix.EINVAL},
++		{"nul-name", path, name + "\x00suffix", unix.EINVAL},
++	} {
++		t.Run(tc.label, func(t *testing.T) {
++			for _, op := range []struct {
++				name string
++				call func() error
++			}{
++				{"Get", func() error {
++					b, e := s.Get(tc.path, tc.name)
++					if e != nil && b != nil {
++						t.Errorf("Get exposed buffer on error: %x", b)
++					}
++					return e
++				}},
++				{"Set", func() error { return s.Set(tc.path, tc.name, []byte("bad")) }},
++				{"Remove", func() error { return s.Remove(tc.path, tc.name) }},
++			} {
++				t.Run(op.name, func(t *testing.T) {
++					if err := op.call(); !errors.Is(err, tc.err) {
++						t.Errorf("got %v; want %v", err, tc.err)
++					}
++					check()
++				})
++			}
++			if tc.label != "nul-name" {
++				names, err := s.List(tc.path)
++				if !errors.Is(err, tc.err) || names != nil {
++					t.Errorf("List=%q, %v; want nil, %v", names, err, tc.err)
++				}
++			}
++		})
++	}
++	buf := make([]byte, 32)
++	n, err := unix.Getxattr(path, name, buf)
++	if err != nil || n != len("preserve") || string(buf[:max(n, 0)]) != "preserve" {
++		t.Errorf("NUL call changed valid attribute: %x, %v", buf, err)
++	}
++	check()
++}
++
++func TestNativeSymlinkFollowsTarget(t *testing.T) {
++	root := t.TempDir()
++	path := filepath.Join(root, "target")
++	link := filepath.Join(root, "link")
++	if err := os.WriteFile(path, []byte("content"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(path, link); err != nil {
++		t.Fatal(err)
++	}
++	s := &XattrStore{}
++	const name = "org.gnomatix.symlink"
++	if err := s.Set(link, name, []byte("target attribute")); err != nil {
++		t.Fatal(err)
++	}
++	got, err := s.Get(path, name)
++	if err != nil || string(got) != "target attribute" {
++		t.Errorf("target Get=%q, %v", got, err)
++	}
++	if names, err := s.List(link); err != nil || !slices.Contains(names, name) {
++		t.Errorf("link List=%q, %v", names, err)
++	}
++	if err := s.Remove(link, name); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := unix.Getxattr(path, name, nil); !errors.Is(err, unix.ENOATTR) {
++		t.Errorf("target attribute not removed: %v", err)
++	}
++	current, err := os.Stat(path)
++	if err != nil || !os.SameFile(info, current) {
++		t.Errorf("target identity changed: %v", err)
++	}
++	if content, err := os.ReadFile(path); err != nil || string(content) != "content" {
++		t.Errorf("target content=%q, %v", content, err)
++	}
++	if target, err := os.Readlink(link); err != nil || target != path {
++		t.Errorf("symlink changed: %q, %v", target, err)
++	}
++}
+diff --git a/internal/engine/linux/ext4/stubs_test.go b/internal/engine/linux/ext4/stubs_test.go
+new file mode 100644
+index 0000000..6de9748
+--- /dev/null
++++ b/internal/engine/linux/ext4/stubs_test.go
+@@ -0,0 +1,66 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build !linux
++
++package ext4
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestUnsupportedOperations(t *testing.T) {
++	root := t.TempDir()
++	path := filepath.Join(root, "original")
++	original := []byte("original\x00content\xff")
++	if err := os.WriteFile(path, original, 0600); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := &XattrStore{}
++	for _, op := range []struct {
++		name string
++		call func() error
++	}{
++		{"Get", func() error {
++			value, e := s.Get(path, "attribute")
++			if value != nil {
++				t.Errorf("unsupported Get returned %x", value)
++			}
++			return e
++		}},
++		{"Set", func() error { return s.Set(path, "attribute", []byte("value")) }},
++		{"List", func() error {
++			names, e := s.List(path)
++			if names != nil {
++				t.Errorf("unsupported List returned %q", names)
++			}
++			return e
++		}},
++		{"Remove", func() error { return s.Remove(path, "attribute") }},
++	} {
++		t.Run(op.name, func(t *testing.T) {
++			if err := op.call(); !errors.Is(err, errors.ErrUnsupported) {
++				t.Errorf("got %v; want ErrUnsupported", err)
++			}
++		})
++	}
++	current, err := os.Stat(path)
++	if err != nil || !os.SameFile(info, current) {
++		t.Errorf("original identity changed: %v", err)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil || !bytes.Equal(got, original) {
++		t.Errorf("original content changed: %x, %v", got, err)
++	}
++	entries, err := os.ReadDir(root)
++	if err != nil || len(entries) != 1 || entries[0].Name() != "original" {
++		t.Errorf("target sidecars created: %v, %v", entries, err)
++	}
++}
+diff --git a/pkg/xyzattr/store_darwin_test.go b/pkg/xyzattr/store_darwin_test.go
+new file mode 100644
+index 0000000..e4ae36b
+--- /dev/null
++++ b/pkg/xyzattr/store_darwin_test.go
+@@ -0,0 +1,185 @@
++// Copyright (c) 2026 GNOMATIX. All rights reserved.
++
++//go:build darwin
++
++package xyzattr
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"slices"
++	"testing"
++
++	"gitea.gnomatix.com/gnomatix/xyzattr/internal/engine/darwin/apfs"
++	"gitea.gnomatix.com/gnomatix/xyzattr/internal/fs"
++	"golang.org/x/sys/unix"
++)
++
++func TestFileStoreDarwinNativeDispatch(t *testing.T) {
++	fixtureHome, err := os.UserHomeDir()
++	if err != nil {
++		t.Fatal(err)
++	}
++	registryPath := filepath.Join(fixtureHome, ".gnomatix", "xyzattr", "attributes.json")
++	registryBefore, registryErr := os.ReadFile(registryPath)
++	if registryErr != nil && !errors.Is(registryErr, os.ErrNotExist) {
++		t.Fatal(registryErr)
++	}
++	t.Cleanup(func() {
++		registryAfter, err := os.ReadFile(registryPath)
++		if registryErr == nil {
++			if err != nil || !bytes.Equal(registryBefore, registryAfter) {
++				t.Errorf("native operations changed registry: %v", err)
++			}
++		} else if !errors.Is(err, os.ErrNotExist) {
++			t.Errorf("native operations created registry or read failed: %v", err)
++		}
++	})
++	for _, kind := range []string{"file", "directory"} {
++		t.Run(kind, func(t *testing.T) {
++			root := t.TempDir()
++			path := filepath.Join(root, "original")
++			contentPath := path
++			if kind == "directory" {
++				if err := os.Mkdir(path, 0700); err != nil {
++					t.Fatal(err)
++				}
++				contentPath = filepath.Join(path, "child")
++			}
++			original := []byte("original\x00content\xff")
++			if err := os.WriteFile(contentPath, original, 0600); err != nil {
++				t.Fatal(err)
++			}
++			info, err := os.Stat(path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			check := func() {
++				t.Helper()
++				current, err := os.Stat(path)
++				if err != nil || !os.SameFile(info, current) {
++					t.Errorf("original identity changed: %v", err)
++				}
++				got, err := os.ReadFile(contentPath)
++				if err != nil || !bytes.Equal(got, original) {
++					t.Errorf("original content=%x, %v", got, err)
++				}
++				entries, err := os.ReadDir(root)
++				if err != nil || len(entries) != 1 || entries[0].Name() != "original" {
++					t.Errorf("target sidecar created: %v, %v", entries, err)
++				}
++			}
++			t.Cleanup(check)
++			filesystem, err := fs.Detect(path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			t.Logf("fixture=%s detected_filesystem=%s", path, filesystem)
++			if filesystem != fs.APFS && filesystem != fs.HFS {
++				t.Fatalf("native fixture needs APFS or HFS; got %s", filesystem)
++			}
++			store := At(path)
++			if _, ok := store.engine.(*apfs.XattrStore); !ok {
++				t.Fatalf("native fixture selected %T", store.engine)
++			}
++			values := []struct {
++				name  string
++				value []byte
++			}{
++				{"org.gnomatix.filestore.binary", []byte{0, 255, 2, 0}},
++				{"org.gnomatix.filestore.empty", []byte{}},
++			}
++			for _, tc := range values {
++				if err := store.Set(tc.name, tc.value); err != nil {
++					t.Fatal(err)
++				}
++				buf := make([]byte, len(tc.value)+1)
++				n, err := unix.Getxattr(path, tc.name, buf)
++				if err != nil || n < 0 || n > len(buf) {
++					t.Fatalf("native read: n=%d err=%v", n, err)
++				}
++				if !bytes.Equal(buf[:n], tc.value) {
++					t.Errorf("native read %s=%x; want %x", tc.name, buf[:n], tc.value)
++				}
++				got, err := At(path).Get(tc.name)
++				if err != nil || !bytes.Equal(got, tc.value) {
++					t.Errorf("FileStore Get %s=%x, %v", tc.name, got, err)
++				}
++				check()
++			}
++			names, err := store.List()
++			if err != nil {
++				t.Fatal(err)
++			}
++			for _, tc := range values {
++				if !slices.Contains(names, tc.name) {
++					t.Errorf("List missing %s: %q", tc.name, names)
++				}
++			}
++			if _, err := store.Get("org.gnomatix.absent"); !errors.Is(err, unix.ENOATTR) {
++				t.Errorf("missing Get: %v", err)
++			}
++			if err := store.Remove("org.gnomatix.absent"); !errors.Is(err, unix.ENOATTR) {
++				t.Errorf("missing Remove: %v", err)
++			}
++			for _, op := range []struct {
++				name string
++				call func() error
++			}{
++				{"Get", func() error { _, e := store.Get(values[0].name + "\x00suffix"); return e }},
++				{"Set", func() error { return store.Set(values[0].name+"\x00suffix", []byte("bad")) }},
++				{"Remove", func() error { return store.Remove(values[0].name + "\x00suffix") }},
++			} {
++				if err := op.call(); !errors.Is(err, unix.EINVAL) {
++					t.Errorf("NUL %s: %v", op.name, err)
++				}
++			}
++			for _, tc := range values {
++				if err := store.Remove(tc.name); err != nil {
++					t.Fatal(err)
++				}
++				if _, err := unix.Getxattr(path, tc.name, nil); !errors.Is(err, unix.ENOATTR) {
++					t.Errorf("native after removal: %v", err)
++				}
++			}
++			// Keep the already-selected native engine bound while traversal permission
++			// changes. Compare the native error; root may legitimately retain access.
++			if err := unix.Setxattr(path, values[0].name, values[0].value, 0); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Chmod(root, 0); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() {
++				if err := os.Chmod(root, 0700); err != nil {
++					t.Error(err)
++				}
++			})
++			for _, op := range []struct {
++				name            string
++				native, library func() error
++			}{
++				{"Get", func() error { _, e := unix.Getxattr(path, values[0].name, nil); return e }, func() error { _, e := store.Get(values[0].name); return e }},
++				{"List", func() error { _, e := unix.Listxattr(path, nil); return e }, func() error { _, e := store.List(); return e }},
++				{"Set", func() error { return unix.Setxattr(path, values[0].name, values[0].value, 0) }, func() error { return store.Set(values[0].name, values[0].value) }},
++				{"Remove", func() error { return unix.Removexattr(path, values[1].name) }, func() error { return store.Remove(values[1].name) }},
++			} {
++				want := op.native()
++				got := op.library()
++				t.Logf("permission control uid=%d operation=%s native_error=%v library_error=%v", os.Geteuid(), op.name, want, got)
++				if !errors.Is(got, want) {
++					t.Errorf("permission %s=%v; want native %v", op.name, got, want)
++				}
++				if os.Geteuid() != 0 && !errors.Is(want, unix.EACCES) {
++					t.Errorf("unprivileged permission fixture %s: %v; want EACCES", op.name, want)
++				}
++			}
++			if err := os.Chmod(root, 0700); err != nil {
++				t.Fatal(err)
++			}
++			check()
++		})
++	}
++}
