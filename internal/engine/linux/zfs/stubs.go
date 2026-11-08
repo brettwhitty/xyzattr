@@ -4,9 +4,15 @@
 
 package zfs
 
+import "errors"
+
 type PropsStore struct{}
 
-func (s *PropsStore) Get(path string, name string) ([]byte, error)     { return nil, nil }
-func (s *PropsStore) Set(path string, name string, value []byte) error { return nil }
-func (s *PropsStore) List(path string) ([]string, error)               { return nil, nil }
-func (s *PropsStore) Remove(path string, name string) error            { return nil }
+func (s *PropsStore) Get(path string, name string) ([]byte, error) {
+	return nil, errors.ErrUnsupported
+}
+func (s *PropsStore) Set(path string, name string, value []byte) error {
+	return errors.ErrUnsupported
+}
+func (s *PropsStore) List(path string) ([]string, error)    { return nil, errors.ErrUnsupported }
+func (s *PropsStore) Remove(path string, name string) error { return errors.ErrUnsupported }
